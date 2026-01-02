@@ -24,8 +24,8 @@ import java.util.Locale
 class EnforcerService : Service() {
 
     // === EXACT TARGET MAC ADDRESSES ===
-    private val CAR_MAC = "F0:04:E1:BE:60:9E" // "B0:65:3A:2D:BC:BC"  // VW BT 3822
-    private val DAC_MAC = "40:ED:98:1A:ED:7E" // "54:B7:E5:D5:4F:74"  // ATF BT HD
+    private val CAR_MAC = "B0:65:3A:2D:BC:BC" // "F0:04:E1:BE:60:9E" // VW BT 3822 / air-pods
+    private val DAC_MAC = "54:B7:E5:D5:4F:74" // "40:ED:98:1A:ED:7E" // ATF BT HD / fiio m17
     // ==================================
 
     // Hidden API constant string
