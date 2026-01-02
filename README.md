@@ -1,7 +1,3 @@
-Here is the brutal, no-nonsense version.
-
-***
-
 # 🛡️ Bluetooth Audio Enforcer
 
 **Forces Android to keep audio on your DAC while using car steering wheel controls.**
@@ -18,17 +14,5 @@ Here is the brutal, no-nonsense version.
 3.  It monitors the Bluetooth A2DP stack.
 4.  If the Car attempts to hijack the audio stream, the app immediately forces it back to the DAC using internal Android APIs (`setActiveDevice` via Reflection).
 
-### ✨ Features
-*   **Hard-coded Priority:** Zero configuration UI. It just works.
-*   **Auto-Start:** Runs automatically on boot. Can't be killed easily (`START_STICKY`).
-*   **Hidden API:** Uses system-level methods to override default Bluetooth routing logic.
-
-### ⚙️ Setup
-Open `EnforcerService.kt` and replace the MAC addresses with yours:
-
-```kotlin
-private val CAR_MAC = "XX:XX:XX:XX:XX:XX" // Your Car (The Hijacker)
-private val DAC_MAC = "YY:YY:YY:YY:YY:YY" // Your DAC (The Output)
-```
-
 **Build. Install. Forget.**
+
