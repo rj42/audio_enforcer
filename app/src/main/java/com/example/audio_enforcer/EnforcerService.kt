@@ -14,6 +14,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -29,6 +30,14 @@ class EnforcerService : Service() {
 
     // Hidden API constant
     private val ACTION_ACTIVE_DEVICE = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
+
+    // Standard Android Volume Intent
+    private val ACTION_VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"
+
+    // Volume Safety State
+    private var cachedSafeVolume: Int = -1
+    private var isSafeDeviceActive: Boolean = false
+    private lateinit var audioManager: AudioManager
 
     companion object {
         // Preference keys
@@ -52,6 +61,7 @@ class EnforcerService : Service() {
             if (profile == BluetoothProfile.A2DP) {
                 a2dpProfile = proxy as BluetoothA2dp
                 log("Service connected to A2DP Profile")
+                // On connect, we don't know the volume state yet, so we just attempt to enforce device
                 forceSwitch()
             }
         }
@@ -63,9 +73,11 @@ class EnforcerService : Service() {
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_ACTIVE_DEVICE) {
+            val action = intent?.action ?: return
 
-                // Always reload settings to ensure hot-swapping works
+            // 1. DEVICE CHANGED EVENT
+            if (action == ACTION_ACTIVE_DEVICE) {
+
                 loadSettings()
 
                 if (targetCarMac.isEmpty() || targetDacMac.isEmpty()) {
@@ -82,7 +94,18 @@ class EnforcerService : Service() {
 
                 val addr = newDevice?.address ?: "NONE"
 
-                // Logic
+                // --- STATE TRACKING ---
+                if (addr.equals(targetDacMac, ignoreCase = true)) {
+                    isSafeDeviceActive = true
+                    // Sync: DAC is active, so current volume is trustworthy
+                    updateVolumeCache()
+                    log("✅ Audio stabilized on DAC (Vol: $cachedSafeVolume)")
+                } else {
+                    // Car or Unknown -> Untrustworthy state
+                    isSafeDeviceActive = false
+                }
+
+                // --- HIJACK LOGIC ---
                 if (addr.equals(targetCarMac, ignoreCase = true)) {
                     log("⚠️ Hijack detected ($addr). Forcing DAC...")
                     forceSwitch()
@@ -90,6 +113,15 @@ class EnforcerService : Service() {
                     log("✅ Audio successfully on DAC.")
                 } else {
                     log("Active device changed to: $addr")
+                }
+            }
+
+            // 2. VOLUME CHANGED EVENT
+            else if (action == ACTION_VOLUME_CHANGED) {
+                // Only update cache if we are strictly on the Safe Device
+                // This prevents capturing the "Max Volume" spike from the Car
+                if (isSafeDeviceActive) {
+                    updateVolumeCache()
                 }
             }
         }
@@ -104,14 +136,24 @@ class EnforcerService : Service() {
     override fun onCreate() {
         super.onCreate()
         isServiceRunning = true
-        startStealthForeground() // Minimal notification
+
+        // Init Audio
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        startStealthForeground()
         loadSettings()
 
         if (targetCarMac.isEmpty()) log("❌ SETUP REQUIRED in App!")
         else log("Started. Block: $targetCarMac -> Target: $targetDacMac")
 
         btAdapter?.getProfileProxy(this, profileListener, BluetoothProfile.A2DP)
-        registerReceiver(receiver, IntentFilter(ACTION_ACTIVE_DEVICE))
+
+        // Register for both Device changes and Volume changes
+        val filter = IntentFilter().apply {
+            addAction(ACTION_ACTIVE_DEVICE)
+            addAction(ACTION_VOLUME_CHANGED)
+        }
+        registerReceiver(receiver, filter)
     }
 
     override fun onDestroy() {
@@ -130,6 +172,13 @@ class EnforcerService : Service() {
         targetDacMac = p.getString(KEY_DAC, "") ?: ""
     }
 
+    private fun updateVolumeCache() {
+        val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        if (current != cachedSafeVolume) {
+            cachedSafeVolume = current
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun forceSwitch() {
         val proxy = a2dpProfile ?: return
@@ -141,10 +190,36 @@ class EnforcerService : Service() {
             try {
                 // Reflection to call internal API
                 proxy.javaClass.getMethod("setActiveDevice", BluetoothDevice::class.java).invoke(proxy, dac)
+
+                // --- VOLUME POLICE ---
+                // Force volume restore after switch
+                enforceSafeguards()
+
                 log("🚀 Switched audio to DAC")
             } catch (e: Exception) { log("❌ Reflection Error: ${e.message}") }
         } else {
             log("⚠️ DAC is not connected via BT")
+        }
+    }
+
+    private fun enforceSafeguards() {
+        if (cachedSafeVolume == -1) return
+
+        val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+
+        // If volume changed unexpectadly
+        if (currentVol != cachedSafeVolume) {
+            val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+
+            // Check for spike
+            if (currentVol == maxVol && cachedSafeVolume != maxVol) {
+                log("👮 Gotcha! Volume spike (MAX) detected. Fixing...")
+            } else {
+                log("⚠️ Restore DAC volume after switch: $currentVol -> $cachedSafeVolume")
+            }
+
+            // Restore
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
         }
     }
 
@@ -157,7 +232,6 @@ class EnforcerService : Service() {
     private fun startStealthForeground() {
         val chanId = "DaemonChannel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // MANAGE_IMPORTANCE_MIN makes it silent and collapsed
             val chan = NotificationChannel(chanId, "Audio Enforcer", NotificationManager.IMPORTANCE_MIN)
             chan.setShowBadge(false)
             getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
