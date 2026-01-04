@@ -102,6 +102,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 11f
             layoutParams = LinearLayout.LayoutParams(-1, -1).apply { topMargin = 40 }
             movementMethod = ScrollingMovementMethod()
+            setTextIsSelectable(true)
         }
         root.addView(logTextView)
         setContentView(root)

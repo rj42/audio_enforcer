@@ -53,7 +53,7 @@ class EnforcerService : Service() {
         // Status flag
         var isServiceRunning = false
 
-        // Persistent Log Buffer (prevents logs appearing empty on app restart)
+        // Persistent Log Buffer
         val logHistory = StringBuilder()
     }
 
@@ -102,8 +102,9 @@ class EnforcerService : Service() {
                 if (addr.equals(targetDacMac, ignoreCase = true)) {
                     isSafeDeviceActive = true
                     // Sync: DAC is active, so current volume is trustworthy
+                    val old = cachedSafeVolume
                     updateVolumeCache()
-                    log("✅ Audio stabilized on DAC (Vol: $cachedSafeVolume)")
+                    log("✅ Settled on DAC. Vol: $cachedSafeVolume (Was: $old)")
                 } else {
                     // Car or Unknown -> Untrustworthy state
                     isSafeDeviceActive = false
@@ -111,21 +112,26 @@ class EnforcerService : Service() {
 
                 // --- HIJACK LOGIC ---
                 if (addr.equals(targetCarMac, ignoreCase = true)) {
-                    log("⚠️ Hijack detected ($addr). Forcing DAC...")
+                    log("⚠️ Hijack detected ($addr). Force switch!")
                     forceSwitch()
-                } else if (addr.equals(targetDacMac, ignoreCase = true)) {
-                    log("✅ Audio successfully on DAC.")
-                } else {
-                    log("Active device changed to: $addr")
+                } else if (!isSafeDeviceActive && addr != "NONE") {
+                    log("ℹ️ Active: $addr (Not DAC)")
                 }
             }
 
             // 2. VOLUME CHANGED EVENT
             else if (action == ACTION_VOLUME_CHANGED) {
+                val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+
                 // Only update cache if we are strictly on the Safe Device
-                // This prevents capturing the "Max Volume" spike from the Car
                 if (isSafeDeviceActive) {
-                    updateVolumeCache()
+                    if (current != cachedSafeVolume) {
+                        log("🔊 Manually changed on DAC: $cachedSafeVolume -> $current")
+                        cachedSafeVolume = current
+                    }
+                } else {
+                    // Log external change for debug
+                    log("🔇 Ext Vol Change: $current (Ignored as Unsafe)")
                 }
             }
         }
@@ -207,11 +213,14 @@ class EnforcerService : Service() {
     }
 
     private fun enforceSafeguards() {
-        if (cachedSafeVolume == -1) return
+        if (cachedSafeVolume == -1) {
+            log("⚠️ Safe volume unknown, skipping restore.")
+            return
+        }
 
         val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
 
-        // If volume changed unexpectedly
+        // If volume changed unexpectadly
         if (currentVol != cachedSafeVolume) {
             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
 
@@ -219,7 +228,7 @@ class EnforcerService : Service() {
             if (currentVol == maxVol && cachedSafeVolume != maxVol) {
                 log("👮 Gotcha! Volume spike (MAX) detected. Fixing...")
             } else {
-                log("⚠️ Restore DAC volume after switch: $currentVol -> $cachedSafeVolume")
+                log("🔧 Restoring safe volume $currentVol -> $cachedSafeVolume")
             }
 
             // Restore
@@ -232,7 +241,6 @@ class EnforcerService : Service() {
         val fullMsg = "[$time] $msg"
         Log.d("AudioLog", fullMsg)
 
-        // Save to static history
         synchronized(logHistory) {
             logHistory.append(fullMsg).append("\n")
             if (logHistory.length > 10000) logHistory.delete(0, 2000)
@@ -245,6 +253,7 @@ class EnforcerService : Service() {
         try {
             val chanId = "DaemonChannel"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // MANAGE_IMPORTANCE_MIN makes it silent and collapsed
                 val chan = NotificationChannel(chanId, "Audio Enforcer", NotificationManager.IMPORTANCE_MIN)
                 chan.setShowBadge(false)
                 getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
