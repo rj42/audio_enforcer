@@ -101,10 +101,9 @@ class EnforcerService : Service() {
                 // --- STATE TRACKING ---
                 if (addr.equals(targetDacMac, ignoreCase = true)) {
                     isSafeDeviceActive = true
-                    // Sync: DAC is active, so current volume is trustworthy
-                    val old = cachedSafeVolume
-                    updateVolumeCache()
-                    log("✅ Settled on DAC. Vol: $cachedSafeVolume (Was: $old)")
+                    // FIX: Don't update cache here (volume is likely polluted). Enforce old safe volume.
+                    enforceSafeguards()
+                    log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
                 } else {
                     // Car or Unknown -> Untrustworthy state
                     isSafeDeviceActive = false
@@ -124,14 +123,10 @@ class EnforcerService : Service() {
                 val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
 
                 // Only update cache if we are strictly on the Safe Device
+                // This prevents capturing the "Max Volume" spike from the Car
                 if (isSafeDeviceActive) {
-                    if (current != cachedSafeVolume) {
-                        log("🔊 Manually changed on DAC: $cachedSafeVolume -> $current")
-                        cachedSafeVolume = current
-                    }
-                } else {
-                    // Log external change for debug
-                    log("🔇 Ext Vol Change: $current (Ignored as Unsafe)")
+                    log("🔊 Manually changed on DAC: $cachedSafeVolume -> $current")
+                    updateVolumeCache()
                 }
             }
         }
