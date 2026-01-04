@@ -121,6 +121,9 @@ class EnforcerService : Service() {
                 if (addr.equals(targetDacMac, ignoreCase = true)) {
                     isSafeDeviceActive = true
 
+                    // Defensive clamping upon return to DAC, because VAG often sends a late volume command.
+                    startClamping()
+
                     if (cachedSafeVolume != -1) {
                         enforceSafeguards()
                         log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
@@ -238,16 +241,18 @@ class EnforcerService : Service() {
         // Only clamp if we have a valid safe volume
         if (cachedSafeVolume == -1) return
 
+        log("🛡️ Clamping started.")
+
         isClamping = true
         // Restart the loop
         handler.removeCallbacks(volumeClamper)
         handler.post(volumeClamper)
 
-        // Stop automatically after 5 seconds of war
+        // Stop automatically after 10 seconds of war
         handler.postDelayed({
             stopClamping()
-            // Optional log: log("🛡️ Clamping finished.")
-        }, 5000)
+            log("🛡️ Clamping finished.")
+        }, 10_000)
     }
 
     private fun stopClamping() {
@@ -289,6 +294,7 @@ class EnforcerService : Service() {
             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             if (currentVol == maxVol && cachedSafeVolume != maxVol) {
                 log("👮 Gotcha! Volume spike (MAX) detected. Fixing...")
+                startClamping()
             }
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
         }
