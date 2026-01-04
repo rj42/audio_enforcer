@@ -181,7 +181,9 @@ class EnforcerService : Service() {
             }
 
             // Case C: Normal change
-            log("🔊 Probably manual change: $cachedSafeVolume -> $current")
+            if (cachedSafeVolume != current) {
+                log("🔊 Probably manual change: $cachedSafeVolume -> $current")
+            }
             updateVolumeCache()
         }
     }
