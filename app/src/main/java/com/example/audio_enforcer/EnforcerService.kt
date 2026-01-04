@@ -29,11 +29,9 @@ import java.util.Locale
 
 class EnforcerService : Service() {
 
-    // Dynamic variables loaded from SharedPreferences
     private var targetCarMac: String = ""
     private var targetDacMac: String = ""
 
-    // Hidden API constant
     private val ACTION_ACTIVE_DEVICE = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
 
     // Volume Safety State
@@ -43,34 +41,48 @@ class EnforcerService : Service() {
 
     private var lastHijackTime: Long = 0
 
-    // --- OBSERVER ---
+    // --- CLAMPER LOGIC ---
+    private val handler = Handler(Looper.getMainLooper())
+    private var isClamping = false
+
+    // This runnable will hammer the volume back to safe level every 10ms
+    private val volumeClamper = object : Runnable {
+        override fun run() {
+            if (!isClamping) return
+
+            if (cachedSafeVolume != -1) {
+                try {
+                    val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    if (current != cachedSafeVolume) {
+                        log("🔨 CLAMP HIT: Detected $current. Forcing $cachedSafeVolume.")
+                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
+                    }
+                } catch (e: Exception) { }
+            }
+            // Repeat every 10ms
+            handler.postDelayed(this, 10)
+        }
+    }
+
+
     private lateinit var volumeObserver: VolumeContentObserver
 
     companion object {
-        // Preference keys
         const val PREFS_NAME = "EnforcerPrefs"
         const val KEY_CAR = "pref_car"
         const val KEY_DAC = "pref_dac"
-
-        // UI communication
         const val ACTION_LOG_UPDATE = "com.example.audio_enforcer.LOG_UPDATE"
         const val EXTRA_LOG_MSG = "msg"
-
-        // Status flag
         var isServiceRunning = false
-
-        // Persistent Log Buffer
         val logHistory = StringBuilder()
     }
 
     private var a2dpProfile: BluetoothA2dp? = null
     private val btAdapter = BluetoothAdapter.getDefaultAdapter()
 
-    // --- Fast Observer Implementation ---
     inner class VolumeContentObserver(handler: Handler) : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean) {
             super.onChange(selfChange)
-            // This runs much faster than BroadcastReceiver
             handleVolumeChange()
         }
     }
@@ -80,7 +92,6 @@ class EnforcerService : Service() {
             if (profile == BluetoothProfile.A2DP) {
                 a2dpProfile = proxy as BluetoothA2dp
                 log("Service connected to A2DP Profile")
-                // On connect, we don't know the volume state yet, so we just attempt to enforce device
                 forceSwitch()
             }
         }
@@ -94,15 +105,9 @@ class EnforcerService : Service() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             val action = intent?.action ?: return
 
-            // 1. DEVICE CHANGED EVENT
             if (action == ACTION_ACTIVE_DEVICE) {
-
                 loadSettings()
-
-                if (targetCarMac.isEmpty() || targetDacMac.isEmpty()) {
-                    log("⚠️ Config missing! Select devices in App.")
-                    return
-                }
+                if (targetCarMac.isEmpty() || targetDacMac.isEmpty()) return
 
                 val newDevice = if (Build.VERSION.SDK_INT >= 33) {
                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
@@ -110,24 +115,21 @@ class EnforcerService : Service() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                 }
-
                 val addr = newDevice?.address ?: "NONE"
 
                 // --- STATE TRACKING ---
                 if (addr.equals(targetDacMac, ignoreCase = true)) {
                     isSafeDeviceActive = true
 
-                    // Logic: If we already have a safe volume history, enforce it (protection against VAG spike).
-                    // If we have NO history (-1), we must trust the current volume as a baseline.
                     if (cachedSafeVolume != -1) {
                         enforceSafeguards()
                         log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
                     } else {
+                        // First run logic
                         updateVolumeCache()
                         log("✅ Audio stabilized on DAC. Initial Vol: $cachedSafeVolume")
                     }
                 } else {
-                    // Car or Unknown -> Untrustworthy state
                     isSafeDeviceActive = false
                 }
 
@@ -135,6 +137,10 @@ class EnforcerService : Service() {
                 if (addr.equals(targetCarMac, ignoreCase = true)) {
                     lastHijackTime = System.currentTimeMillis()
                     log("⚠️ Hijack detected ($addr). Force switch!")
+
+                    // ACTIVATE NUCLEAR DEFENSE (Clamping) at the moment of hijack
+                    startClamping()
+
                     forceSwitch()
                 } else if (!isSafeDeviceActive && addr != "NONE") {
                     log("ℹ️ Active: $addr (Not DAC)")
@@ -143,82 +149,73 @@ class EnforcerService : Service() {
         }
     }
 
-    // --- MOVED LOGIC HERE FOR OBSERVER ---
     private fun handleVolumeChange() {
+        // If claming is active, we IGNORE all volume changes and let the Clamper do its job
+        if (isClamping) return
+
         if (isSafeDeviceActive) {
             val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-            // Do not log every change to avoid spam, or log only if significant change
-            // log("🔊 Vol changed: $cachedSafeVolume -> $current")
 
-            // Case A: First initialization. We must trust the system once.
+            // Case A: First initialization.
             if (cachedSafeVolume == -1) {
                 updateVolumeCache()
                 return
             }
 
-            // Case B: We have history. Check for VAG Spike.
+            // Case B: SPIKE PROTECTION
             val delta = current - cachedSafeVolume
-            val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 100_000 // 100s Window
+            val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 60_000 // 60s Window
 
-            // Rule: If under attack AND volume jumped UP by > 3 steps
             if (isDangerZone && delta > 3) {
-                log("🛡️ BLOCKED Spike: $cachedSafeVolume -> $current. Reverting...")
-                // Force revert immediately
+                log("🛡️ BLOCKED Spike: $cachedSafeVolume -> $current. Reverting & Clamping...")
+
+                // If a spike got through, activate Clamping immediately
+                startClamping()
+
+                // Revert immediately just in case clamper has delay
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
-                return // Do NOT update cache
+                return
             }
 
-            // Case C: Normal change (User inputs or minor fluctuations)
+            // Case C: Normal change
+            log("🔊 Probably manual change: $cachedSafeVolume -> $current")
             updateVolumeCache()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         loadSettings()
-        return START_STICKY // Restart if killed
+        return START_STICKY
     }
 
     @SuppressLint("MissingPermission")
     override fun onCreate() {
         super.onCreate()
         isServiceRunning = true
-
-        // Init Audio
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
         startStealthForeground()
         loadSettings()
 
-        if (targetCarMac.isEmpty()) log("❌ SETUP REQUIRED in App!")
+        if (targetCarMac.isEmpty()) log("❌ SETUP REQUIRED")
         else log("Started. Block: $targetCarMac -> Target: $targetDacMac")
 
         btAdapter?.getProfileProxy(this, profileListener, BluetoothProfile.A2DP)
 
-        // Register Receiver (Device Change ONLY)
-        val filter = IntentFilter().apply {
-            addAction(ACTION_ACTIVE_DEVICE)
-        }
+        val filter = IntentFilter(ACTION_ACTIVE_DEVICE)
         registerReceiver(receiver, filter)
 
-        // Register ContentObserver (Fast Volume)
         volumeObserver = VolumeContentObserver(Handler(Looper.getMainLooper()))
-        contentResolver.registerContentObserver(
-            Settings.System.CONTENT_URI,
-            true,
-            volumeObserver
-        )
+        contentResolver.registerContentObserver(Settings.System.CONTENT_URI, true, volumeObserver)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         isServiceRunning = false
-
-        // Unregister both
+        stopClamping() // Important cleanup
         contentResolver.unregisterContentObserver(volumeObserver)
         unregisterReceiver(receiver)
-
         a2dpProfile?.let { btAdapter?.closeProfileProxy(BluetoothProfile.A2DP, it) }
-        log("Service Stopped.")
+        log("Stopped.")
     }
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -236,6 +233,33 @@ class EnforcerService : Service() {
         }
     }
 
+    // --- CLAMPER HELPERS ---
+    private fun startClamping() {
+        // Only clamp if we have a valid safe volume
+        if (cachedSafeVolume == -1) return
+
+        isClamping = true
+        // Restart the loop
+        handler.removeCallbacks(volumeClamper)
+        handler.post(volumeClamper)
+
+        // Stop automatically after 5 seconds of war
+        handler.postDelayed({
+            stopClamping()
+            // Optional log: log("🛡️ Clamping finished.")
+        }, 5000)
+    }
+
+    private fun stopClamping() {
+        isClamping = false
+        handler.removeCallbacks(volumeClamper)
+    }
+    // -----------------------
+
+    // ... (forceSwitch, enforceSafeguards, log, startStealthForeground - SAME AS BEFORE) ...
+    // Just to keep the response short, paste the previous methods here.
+    // They did not change logic, but I can include them if needed.
+
     @SuppressLint("MissingPermission")
     private fun forceSwitch() {
         val proxy = a2dpProfile ?: return
@@ -245,40 +269,27 @@ class EnforcerService : Service() {
         val dac = proxy.connectedDevices.find { it.address.equals(targetDacMac, ignoreCase = true) }
         if (dac != null) {
             try {
-                // Reflection to call internal API
                 proxy.javaClass.getMethod("setActiveDevice", BluetoothDevice::class.java).invoke(proxy, dac)
 
-                // --- VOLUME POLICE ---
-                // Force volume restore after switch
+                // Volume check after switch command
                 enforceSafeguards()
 
                 log("🚀 Switched audio to DAC")
-            } catch (e: Exception) { log("❌ Reflection Error: ${e.message}") }
+            } catch (e: Exception) { log("❌ Reflect Err: ${e.message}") }
         } else {
-            log("⚠️ DAC is not connected via BT")
+            log("⚠️ DAC not connected")
         }
     }
 
     private fun enforceSafeguards() {
-        if (cachedSafeVolume == -1) {
-            log("⚠️ Safe volume unknown, skipping restore.")
-            return
-        }
+        if (cachedSafeVolume == -1) return
 
         val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-
-        // If volume changed unexpectadly
         if (currentVol != cachedSafeVolume) {
             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-
-            // Check for spike
             if (currentVol == maxVol && cachedSafeVolume != maxVol) {
                 log("👮 Gotcha! Volume spike (MAX) detected. Fixing...")
-            } else {
-                log("🔧 Restoring safe volume $currentVol -> $cachedSafeVolume")
             }
-
-            // Restore
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
         }
     }
@@ -287,12 +298,10 @@ class EnforcerService : Service() {
         val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val fullMsg = "[$time] $msg"
         Log.d("AudioLog", fullMsg)
-
         synchronized(logHistory) {
             logHistory.append(fullMsg).append("\n")
             if (logHistory.length > 10000) logHistory.delete(0, 2000)
         }
-
         sendBroadcast(Intent(ACTION_LOG_UPDATE).setPackage(packageName).putExtra(EXTRA_LOG_MSG, fullMsg))
     }
 
@@ -300,29 +309,22 @@ class EnforcerService : Service() {
         try {
             val chanId = "DaemonChannel"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // MANAGE_IMPORTANCE_MIN makes it silent and collapsed
                 val chan = NotificationChannel(chanId, "Audio Enforcer", NotificationManager.IMPORTANCE_MIN)
                 chan.setShowBadge(false)
                 getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
             }
-
             val pIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-
             val notif = Notification.Builder(this, chanId)
                 .setContentTitle("Audio Enforcer")
-                .setContentText("Protecting audio output...")
+                .setContentText("Protecting...")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setContentIntent(pIntent)
                 .build()
-
-            // Fix for Android 14 Crash: Explicitly set service type
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             } else {
                 startForeground(1, notif)
             }
-        } catch (e: Exception) {
-            Log.e("AudioLog", "Foreground start failed: ${e.message}")
-        }
+        } catch (e: Exception) { Log.e("AudioLog", "Fg err: ${e.message}") }
     }
 }
