@@ -142,7 +142,7 @@ class EnforcerService : Service() {
 
                     // Case B: We have history. Check for VAG Spike.
                     val delta = current - cachedSafeVolume
-                    val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 10_000 // 10s Window
+                    val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 100_000 // 100s Window
 
                     // Rule: If under attack AND volume jumped UP by > 3 steps
                     if (isDangerZone && delta > 3) {
