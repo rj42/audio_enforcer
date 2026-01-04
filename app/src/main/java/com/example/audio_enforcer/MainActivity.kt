@@ -33,7 +33,7 @@ class MainActivity : AppCompatActivity() {
         override fun toString() = "$name ($addr)"
     }
 
-    // Receiver for logs
+    // Receiver for new logs coming from Service
     private val logRec = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, i: Intent?) {
             if (i?.action == EnforcerService.ACTION_LOG_UPDATE) {
@@ -107,6 +107,11 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
 
         // --- LOGIC ---
+
+        // 1. Restore logs from Service history (This fixes the empty screen issue)
+        logTextView.text = EnforcerService.logHistory.toString()
+        scrollLog() // Scroll to bottom
+
         if(checkPerms()) {
             initSpinners()
             refreshBtnState()
@@ -125,7 +130,7 @@ class MainActivity : AppCompatActivity() {
         if (!btAdapter.isEnabled) return
 
         val list = ArrayList<DeviceItem>()
-        list.add(DeviceItem("- Select -", "")) // Default empty option
+        list.add(DeviceItem("- Select -", ""))
 
         // Populate with bonded devices
         btAdapter.bondedDevices.forEach {
@@ -166,7 +171,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
         }
-        // Small delay to allow service to start up and update status
+        // Small delay to update UI status correctly
         logTextView.postDelayed({ refreshBtnState() }, 200)
     }
 
@@ -182,9 +187,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Register receiver
         val filter = IntentFilter(EnforcerService.ACTION_LOG_UPDATE)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(logRec, filter, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(logRec, filter)
+
+        // Refresh logs from static history just in case we missed something while paused
+        logTextView.text = EnforcerService.logHistory.toString()
+        scrollLog()
+
         refreshBtnState()
     }
 
@@ -192,6 +203,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendLog(msg: String) {
         logTextView.text = "${logTextView.text}\n$msg".takeLast(5000)
+        scrollLog()
+    }
+
+    // Helper to safely scroll safely to bottom after UI update
+    private fun scrollLog() {
         logTextView.post {
             if(logTextView.layout != null) {
                 val s = logTextView.layout.getLineTop(logTextView.lineCount) - logTextView.height

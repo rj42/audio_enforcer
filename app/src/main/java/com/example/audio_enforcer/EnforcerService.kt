@@ -14,6 +14,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
@@ -51,6 +52,9 @@ class EnforcerService : Service() {
 
         // Status flag
         var isServiceRunning = false
+
+        // Persistent Log Buffer (prevents logs appearing empty on app restart)
+        val logHistory = StringBuilder()
     }
 
     private var a2dpProfile: BluetoothA2dp? = null
@@ -207,7 +211,7 @@ class EnforcerService : Service() {
 
         val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
 
-        // If volume changed unexpectadly
+        // If volume changed unexpectedly
         if (currentVol != cachedSafeVolume) {
             val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
 
@@ -225,26 +229,44 @@ class EnforcerService : Service() {
 
     private fun log(msg: String) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        Log.d("AudioLog", msg)
-        sendBroadcast(Intent(ACTION_LOG_UPDATE).setPackage(packageName).putExtra(EXTRA_LOG_MSG, "[$time] $msg"))
+        val fullMsg = "[$time] $msg"
+        Log.d("AudioLog", fullMsg)
+
+        // Save to static history
+        synchronized(logHistory) {
+            logHistory.append(fullMsg).append("\n")
+            if (logHistory.length > 10000) logHistory.delete(0, 2000)
+        }
+
+        sendBroadcast(Intent(ACTION_LOG_UPDATE).setPackage(packageName).putExtra(EXTRA_LOG_MSG, fullMsg))
     }
 
     private fun startStealthForeground() {
-        val chanId = "DaemonChannel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val chan = NotificationChannel(chanId, "Audio Enforcer", NotificationManager.IMPORTANCE_MIN)
-            chan.setShowBadge(false)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
+        try {
+            val chanId = "DaemonChannel"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val chan = NotificationChannel(chanId, "Audio Enforcer", NotificationManager.IMPORTANCE_MIN)
+                chan.setShowBadge(false)
+                getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
+            }
+
+            val pIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+
+            val notif = Notification.Builder(this, chanId)
+                .setContentTitle("Audio Enforcer")
+                .setContentText("Protecting audio output...")
+                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setContentIntent(pIntent)
+                .build()
+
+            // Fix for Android 14 Crash: Explicitly set service type
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
+                startForeground(1, notif)
+            }
+        } catch (e: Exception) {
+            Log.e("AudioLog", "Foreground start failed: ${e.message}")
         }
-
-        val pIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-
-        val notif = Notification.Builder(this, chanId)
-            .setContentTitle("Audio Enforcer")
-            .setContentText("Protecting audio output...")
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentIntent(pIntent)
-            .build()
-        startForeground(1, notif)
     }
 }
