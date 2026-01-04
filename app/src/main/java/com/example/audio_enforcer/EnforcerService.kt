@@ -40,6 +40,8 @@ class EnforcerService : Service() {
     private var isSafeDeviceActive: Boolean = false
     private lateinit var audioManager: AudioManager
 
+    private var lastHijackTime: Long = 0
+
     companion object {
         // Preference keys
         const val PREFS_NAME = "EnforcerPrefs"
@@ -118,6 +120,7 @@ class EnforcerService : Service() {
 
                 // --- HIJACK LOGIC ---
                 if (addr.equals(targetCarMac, ignoreCase = true)) {
+                    lastHijackTime = System.currentTimeMillis()
                     log("⚠️ Hijack detected ($addr). Force switch!")
                     forceSwitch()
                 } else if (!isSafeDeviceActive && addr != "NONE") {
@@ -127,12 +130,29 @@ class EnforcerService : Service() {
 
             // 2. VOLUME CHANGED EVENT
             else if (action == ACTION_VOLUME_CHANGED) {
-                val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-
-                // Only update cache if we are strictly on the Safe Device
-                // This prevents capturing the "Max Volume" spike from the Car
                 if (isSafeDeviceActive) {
-                    log("🔊 Manually changed on DAC: $cachedSafeVolume -> $current")
+                    val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    log("🔊 Probably manually changed on DAC: $cachedSafeVolume -> $current")
+
+                    // Case A: First initialization. We must trust the system once.
+                    if (cachedSafeVolume == -1) {
+                        updateVolumeCache()
+                        return
+                    }
+
+                    // Case B: We have history. Check for VAG Spike.
+                    val delta = current - cachedSafeVolume
+                    val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 10_000 // 10s Window
+
+                    // Rule: If under attack AND volume jumped UP by > 3 steps
+                    if (isDangerZone && delta > 3) {
+                        log("🛡️ BLOCKED Spike: $cachedSafeVolume -> $current. Reverting...")
+                        // Force revert immediately
+                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
+                        return // Do NOT update cache
+                    }
+
+                    // Case C: Normal change (User inputs or minor fluctuations)
                     updateVolumeCache()
                 }
             }
