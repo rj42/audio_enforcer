@@ -101,9 +101,16 @@ class EnforcerService : Service() {
                 // --- STATE TRACKING ---
                 if (addr.equals(targetDacMac, ignoreCase = true)) {
                     isSafeDeviceActive = true
-                    // FIX: Don't update cache here (volume is likely polluted). Enforce old safe volume.
-                    enforceSafeguards()
-                    log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
+
+                    // Logic: If we already have a safe volume history, enforce it (protection against VAG spike).
+                    // If we have NO history (-1), we must trust the current volume as a baseline.
+                    if (cachedSafeVolume != -1) {
+                        enforceSafeguards()
+                        log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
+                    } else {
+                        updateVolumeCache()
+                        log("✅ Audio stabilized on DAC. Initial Vol: $cachedSafeVolume")
+                    }
                 } else {
                     // Car or Unknown -> Untrustworthy state
                     isSafeDeviceActive = false
