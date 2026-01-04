@@ -15,9 +15,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.database.ContentObserver
 import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -32,15 +36,15 @@ class EnforcerService : Service() {
     // Hidden API constant
     private val ACTION_ACTIVE_DEVICE = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
 
-    // Standard Android Volume Intent
-    private val ACTION_VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"
-
     // Volume Safety State
     private var cachedSafeVolume: Int = -1
     private var isSafeDeviceActive: Boolean = false
     private lateinit var audioManager: AudioManager
 
     private var lastHijackTime: Long = 0
+
+    // --- OBSERVER ---
+    private lateinit var volumeObserver: VolumeContentObserver
 
     companion object {
         // Preference keys
@@ -61,6 +65,15 @@ class EnforcerService : Service() {
 
     private var a2dpProfile: BluetoothA2dp? = null
     private val btAdapter = BluetoothAdapter.getDefaultAdapter()
+
+    // --- Fast Observer Implementation ---
+    inner class VolumeContentObserver(handler: Handler) : ContentObserver(handler) {
+        override fun onChange(selfChange: Boolean) {
+            super.onChange(selfChange)
+            // This runs much faster than BroadcastReceiver
+            handleVolumeChange()
+        }
+    }
 
     private val profileListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile?) {
@@ -127,35 +140,36 @@ class EnforcerService : Service() {
                     log("ℹ️ Active: $addr (Not DAC)")
                 }
             }
+        }
+    }
 
-            // 2. VOLUME CHANGED EVENT
-            else if (action == ACTION_VOLUME_CHANGED) {
-                if (isSafeDeviceActive) {
-                    val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                    log("🔊 Probably manually changed on DAC: $cachedSafeVolume -> $current")
+    // --- MOVED LOGIC HERE FOR OBSERVER ---
+    private fun handleVolumeChange() {
+        if (isSafeDeviceActive) {
+            val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            // Do not log every change to avoid spam, or log only if significant change
+            // log("🔊 Vol changed: $cachedSafeVolume -> $current")
 
-                    // Case A: First initialization. We must trust the system once.
-                    if (cachedSafeVolume == -1) {
-                        updateVolumeCache()
-                        return
-                    }
-
-                    // Case B: We have history. Check for VAG Spike.
-                    val delta = current - cachedSafeVolume
-                    val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 100_000 // 100s Window
-
-                    // Rule: If under attack AND volume jumped UP by > 3 steps
-                    if (isDangerZone && delta > 3) {
-                        log("🛡️ BLOCKED Spike: $cachedSafeVolume -> $current. Reverting...")
-                        // Force revert immediately
-                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
-                        return // Do NOT update cache
-                    }
-
-                    // Case C: Normal change (User inputs or minor fluctuations)
-                    updateVolumeCache()
-                }
+            // Case A: First initialization. We must trust the system once.
+            if (cachedSafeVolume == -1) {
+                updateVolumeCache()
+                return
             }
+
+            // Case B: We have history. Check for VAG Spike.
+            val delta = current - cachedSafeVolume
+            val isDangerZone = (System.currentTimeMillis() - lastHijackTime) < 100_000 // 100s Window
+
+            // Rule: If under attack AND volume jumped UP by > 3 steps
+            if (isDangerZone && delta > 3) {
+                log("🛡️ BLOCKED Spike: $cachedSafeVolume -> $current. Reverting...")
+                // Force revert immediately
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
+                return // Do NOT update cache
+            }
+
+            // Case C: Normal change (User inputs or minor fluctuations)
+            updateVolumeCache()
         }
     }
 
@@ -180,18 +194,29 @@ class EnforcerService : Service() {
 
         btAdapter?.getProfileProxy(this, profileListener, BluetoothProfile.A2DP)
 
-        // Register for both Device changes and Volume changes
+        // Register Receiver (Device Change ONLY)
         val filter = IntentFilter().apply {
             addAction(ACTION_ACTIVE_DEVICE)
-            addAction(ACTION_VOLUME_CHANGED)
         }
         registerReceiver(receiver, filter)
+
+        // Register ContentObserver (Fast Volume)
+        volumeObserver = VolumeContentObserver(Handler(Looper.getMainLooper()))
+        contentResolver.registerContentObserver(
+            Settings.System.CONTENT_URI,
+            true,
+            volumeObserver
+        )
     }
 
     override fun onDestroy() {
         super.onDestroy()
         isServiceRunning = false
+
+        // Unregister both
+        contentResolver.unregisterContentObserver(volumeObserver)
         unregisterReceiver(receiver)
+
         a2dpProfile?.let { btAdapter?.closeProfileProxy(BluetoothProfile.A2DP, it) }
         log("Service Stopped.")
     }
