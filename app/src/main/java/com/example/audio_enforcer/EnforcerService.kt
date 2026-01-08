@@ -134,7 +134,7 @@ class EnforcerService : Service() {
                         log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
                     } else {
                         // First run logic
-                        updateVolumeCache()
+                        updateVolumeCache("init volume")
                         log("✅ Audio stabilized on DAC. Initial Vol: $cachedSafeVolume")
                     }
                 } else {
@@ -166,7 +166,7 @@ class EnforcerService : Service() {
 
             // Case A: First initialization.
             if (cachedSafeVolume == -1) {
-                updateVolumeCache()
+                updateVolumeCache("first initialization")
                 return
             }
 
@@ -189,7 +189,7 @@ class EnforcerService : Service() {
             if (cachedSafeVolume != current) {
                 log("🔊 Probably manual change: $cachedSafeVolume -> $current")
             }
-            updateVolumeCache()
+            updateVolumeCache("VolumeChanged Event")
         }
     }
 
@@ -236,9 +236,10 @@ class EnforcerService : Service() {
         targetDacMac = p.getString(KEY_DAC, "") ?: ""
     }
 
-    private fun updateVolumeCache() {
+    private fun updateVolumeCache(reason: String) {
         val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         if (current != cachedSafeVolume) {
+            log("ℹ️ Cache Updated [$reason]: $cachedSafeVolume -> $current")
             cachedSafeVolume = current
         }
     }
