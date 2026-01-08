@@ -45,6 +45,11 @@ class EnforcerService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var isClamping = false
 
+    private val stopClampingRunnable = Runnable {
+        stopClamping()
+        log("🛡️ Clamping finished.")
+    }
+
     // This runnable will hammer the volume back to safe level every 10ms
     private val volumeClamper = object : Runnable {
         override fun run() {
@@ -243,7 +248,14 @@ class EnforcerService : Service() {
         // Only clamp if we have a valid safe volume
         if (cachedSafeVolume == -1) return
 
-        log("🛡️ Clamping started.")
+        // Cancel pending stop so we extend the time instead of cutting short
+        handler.removeCallbacks(stopClampingRunnable)
+
+        if (!isClamping) {
+            log("🛡️ Clamping started.")
+        } else {
+            log("🛡️ Clamping continued.")
+        }
 
         isClamping = true
         // Restart the loop
@@ -251,15 +263,13 @@ class EnforcerService : Service() {
         handler.post(volumeClamper)
 
         // Stop automatically after 10 seconds of war
-        handler.postDelayed({
-            stopClamping()
-            log("🛡️ Clamping finished.")
-        }, 10_000)
+        handler.postDelayed(stopClampingRunnable, 10_000)
     }
 
     private fun stopClamping() {
         isClamping = false
         handler.removeCallbacks(volumeClamper)
+        handler.removeCallbacks(stopClampingRunnable)
     }
     // -----------------------
 
