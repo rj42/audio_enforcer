@@ -58,7 +58,7 @@ class EnforcerService : Service() {
             if (cachedSafeVolume != -1) {
                 try {
                     val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                    if (current - cachedSafeVolume > 1) {
+                    if (current - cachedSafeVolume > 2) {
                         log("🔨 CLAMP HIT: Detected $current. Forcing $cachedSafeVolume.")
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, cachedSafeVolume, 0)
                     }
