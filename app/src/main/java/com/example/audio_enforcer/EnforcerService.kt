@@ -134,8 +134,7 @@ class EnforcerService : Service() {
                         log("✅ Audio stabilized on DAC. Enforcing Vol: $cachedSafeVolume")
                     } else {
                         // First run logic
-                        updateVolumeCache("init volume")
-                        log("✅ Audio stabilized on DAC. Initial Vol: $cachedSafeVolume")
+                        forceSafeDefaultVolume("Receiver Init")
                     }
                 } else {
                     isSafeDeviceActive = false
@@ -166,7 +165,7 @@ class EnforcerService : Service() {
 
             // Case A: First initialization.
             if (cachedSafeVolume == -1) {
-                updateVolumeCache("first initialization")
+                forceSafeDefaultVolume("Observer Init")
                 return
             }
 
@@ -234,6 +233,13 @@ class EnforcerService : Service() {
         val p = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         targetCarMac = p.getString(KEY_CAR, "") ?: ""
         targetDacMac = p.getString(KEY_DAC, "") ?: ""
+    }
+
+    private fun forceSafeDefaultVolume(reason: String) {
+        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val safeDefault = maxVol / 3
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, safeDefault, 0)
+        updateVolumeCache(reason)
     }
 
     private fun updateVolumeCache(reason: String) {
